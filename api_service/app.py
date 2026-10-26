@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hmac
 import json
 import logging
 import os
@@ -14,14 +13,10 @@ from tempfile import TemporaryDirectory
 from typing import Annotated
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.openapi.utils import get_openapi
 from starlette.responses import FileResponse, JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 log = logging.getLogger("watermark-api")
-API_KEY = os.environ.get("API_KEY", "")
-if not API_KEY.strip():
-    raise RuntimeError("Set a non-empty API_KEY before starting the API")
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "512")) * 1024 * 1024
 PROCESS_TIMEOUT = int(os.getenv("PROCESS_TIMEOUT_SECONDS", "1800"))
 UPLOAD_IDLE_TIMEOUT = int(os.getenv("UPLOAD_IDLE_TIMEOUT_SECONDS", "60"))
@@ -39,7 +34,7 @@ VIDEO_TYPES = {".mp4": "video/mp4", ".mov": "video/quicktime", ".m4v": "video/x-
 
 
 class UploadGuard:
-    """Authenticate and bound the entire multipart body before it is spooled.
+    """Bound the entire multipart body before it is spooled.
 
     One semaphore covers upload, processing and download. Use exactly one Uvicorn
     worker: these admission counters are intentionally local to that process.
@@ -54,10 +49,6 @@ class UploadGuard:
             await self.app(scope, receive, send)
             return
         headers = dict(scope["headers"])
-        supplied = headers.get(b"x-api-key", b"")
-        if not hmac.compare_digest(supplied, API_KEY.encode("utf-8")):
-            await JSONResponse({"detail": "Invalid API key"}, status_code=401)(scope, receive, send)
-            return
         try:
             content_length = int(headers.get(b"content-length", b"0"))
         except ValueError:
@@ -106,23 +97,6 @@ app = FastAPI(
     description="Remove visible marks and AI metadata. Hidden SynthID is not processed.",
 )
 app.add_middleware(UploadGuard)
-
-
-def openapi():
-    if app.openapi_schema is None:
-        schema = get_openapi(title=app.title, version=app.version, description=app.description, routes=app.routes)
-        schema.setdefault("components", {}).setdefault("securitySchemes", {})["ApiKey"] = {
-            "type": "apiKey", "in": "header", "name": "X-API-Key"
-        }
-        for path, operations in schema["paths"].items():
-            if path.startswith("/v1/"):
-                for operation in operations.values():
-                    operation["security"] = [{"ApiKey": []}]
-        app.openapi_schema = schema
-    return app.openapi_schema
-
-
-app.openapi = openapi
 
 
 @app.get("/healthz", tags=["health"])
@@ -227,7 +201,6 @@ FILE_RESPONSES = {
         "description": "Processed media file; inspect X-Watermark-Report for detection results.",
         "content": {"application/octet-stream": {"schema": {"type": "string", "format": "binary"}}},
     },
-    401: {"description": "Missing or invalid API key"},
     413: {"description": "Upload too large"},
     415: {"description": "Unsupported extension or content"},
     422: {"description": "Invalid media, no mark detected, or incomplete image removal"},

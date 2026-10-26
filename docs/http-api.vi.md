@@ -3,7 +3,7 @@
 Bộ API dùng trực tiếp mã nguồn trong repository này, không gọi dịch vụ bên ngoài.
 Mỗi request nhận một file qua multipart và trả về một file để tải xuống. Docker
 chạy Linux, Python 3.12, FFmpeg và CPU; cấu hình mặc định không cần GPU, model hay
-Google API key. `API_KEY` bên dưới là khóa bảo vệ API của bạn.
+Google API key. Các endpoint không yêu cầu xác thực hay header API key.
 
 ## Phạm vi xử lý
 
@@ -33,7 +33,7 @@ gói hệ thống và thư viện Python. Không cần cài Python/FFmpeg trên 
 cp .env.api.example .env.api
 ```
 
-Sửa `API_KEY` trong `.env.api` thành khóa ngẫu nhiên riêng. Sau đó:
+Sau đó:
 
 ```bash
 docker compose --env-file .env.api up -d --build
@@ -42,9 +42,9 @@ docker compose --env-file .env.api logs -f watermark-api
 
 Mặc định dịch vụ chỉ bind `127.0.0.1:8000`. Để truy cập trực tiếp từ máy khác,
 đổi `API_BIND_HOST=0.0.0.0`; dùng firewall và HTTPS qua reverse proxy cho môi
-trường triển khai có truy cập từ Internet. API dùng header `X-API-Key`.
+trường triển khai có truy cập từ Internet.
 
-- Swagger: `http://localhost:8000/docs` → **Authorize** → nhập API key.
+- Swagger: `http://localhost:8000/docs`, có thể gọi trực tiếp không cần xác thực.
 - OpenAPI: `http://localhost:8000/openapi.json`.
 - Health: `GET http://localhost:8000/healthz`, không cần API key.
 
@@ -61,7 +61,6 @@ viết lệnh trên một dòng, hoặc thay dấu xuống dòng `\` bằng back
 
 ```bash
 curl --fail --show-error \
-  -H 'X-API-Key: YOUR_API_KEY' \
   -F 'file=@gemini.png' \
   -D image-headers.txt \
   -o clean.png \
@@ -72,7 +71,6 @@ Video Veo:
 
 ```bash
 curl --fail --show-error --max-time 1900 \
-  -H 'X-API-Key: YOUR_API_KEY' \
   -F 'file=@veo.mp4' \
   -D video-headers.txt \
   -o clean.mp4 \
@@ -143,7 +141,7 @@ Reverse proxy cần cho phép body lớn hơn `MAX_UPLOAD_MB` khoảng 1 MiB và
 đồng bộ, kết nối HTTP giữ mở đến khi xử lý xong; ngắt kết nối client không đảm bảo
 dừng job ngay. Job vẫn bị chặn bởi timeout và giới hạn tài nguyên.
 
-Mã lỗi chính: 400 upload rỗng/multipart không hợp lệ, 401 sai khóa, 408 upload
+Mã lỗi chính: 400 upload rỗng/multipart không hợp lệ, 408 upload
 bị treo, 413 quá dung lượng, 415 đuôi không hỗ trợ, 422 input không hợp lệ/không
 tìm được dấu/xóa chưa đạt, 500 xử lý lỗi, 503 hết slot, 504 quá thời gian.
 Các dependency đang dùng khoảng phiên bản trong requirements/pyproject; build lại
