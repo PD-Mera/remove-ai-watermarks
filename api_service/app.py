@@ -10,7 +10,7 @@ from pathlib import Path
 import signal
 import sys
 from tempfile import TemporaryDirectory
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from starlette.responses import FileResponse, JSONResponse
@@ -93,7 +93,7 @@ class UploadGuard:
 
 app = FastAPI(
     title="Gemini / Veo Visible Watermark API",
-    version="1.0.0",
+    version="1.1.0",
     description="Remove visible marks and AI metadata. Hidden SynthID is not processed.",
 )
 app.add_middleware(UploadGuard)
@@ -101,15 +101,18 @@ app.add_middleware(UploadGuard)
 
 @app.get("/healthz", tags=["health"])
 async def health():
-    return {"status": "ok", "backend": BACKEND, "scope": "visible-and-metadata"}
+    return {"status": "ok", "version": app.version, "backend": BACKEND, "scope": "visible-and-metadata"}
 
 
-async def run_worker(kind: str, source: Path, output: Path, directory: Path, required: bool) -> dict:
+async def run_worker(
+    kind: str, source: Path, output: Path, directory: Path, required: bool, options: dict,
+) -> dict:
     result_path = directory / "result.json"
     with (directory / "worker.log").open("wb") as worker_log:
         process = await asyncio.create_subprocess_exec(
             sys.executable, "-m", "api_service.worker", kind, str(source), str(output),
             str(result_path), BACKEND, "required" if required else "optional",
+            json.dumps(options),
             stdout=worker_log, stderr=worker_log, start_new_session=True,
         )
         try:
@@ -133,7 +136,10 @@ async def run_worker(kind: str, source: Path, output: Path, directory: Path, req
     if process.returncode != 0 or "error" in result:
         log_worker_failure(directory)
         log.warning("Processing failed: %s", result)
-        raise HTTPException(result.get("http_status", 500), result.get("error", "Processing failed"))
+        detail = result.get("error", "Processing failed")
+        if "report" in result:
+            detail = {"message": detail, "report": result["report"]}
+        raise HTTPException(result.get("http_status", 500), detail)
     if not output.is_file() or output.stat().st_size == 0:
         raise HTTPException(500, "Processor did not produce an output file")
     return result
@@ -147,7 +153,9 @@ def log_worker_failure(directory: Path) -> None:
         log.error("Worker diagnostics: %s", stream.read().decode("utf-8", errors="replace"))
 
 
-async def clean_file(file: UploadFile, kind: str, require_watermark: bool) -> FileResponse:
+async def clean_file(
+    file: UploadFile, kind: str, require_watermark: bool, options: dict | None = None,
+) -> FileResponse:
     suffix = Path(file.filename or "").suffix.lower()
     allowed = IMAGE_SUFFIXES if kind == "image" else VIDEO_TYPES.keys()
     if suffix not in allowed:
@@ -170,7 +178,7 @@ async def clean_file(file: UploadFile, kind: str, require_watermark: bool) -> Fi
         await file.close()
         if size == 0:
             raise HTTPException(400, "Empty upload")
-        result = await run_worker(kind, source, output, directory, require_watermark)
+        result = await run_worker(kind, source, output, directory, require_watermark, options or {})
 
         class TemporaryFileResponse(FileResponse):
             async def __call__(self, scope, receive, send):
@@ -213,9 +221,26 @@ FILE_RESPONSES = {
 async def remove_image(
     file: Annotated[UploadFile, File(description="Gemini / Nano Banana PNG, JPEG or WebP")],
     require_watermark: Annotated[bool, Form(description="Fail if no known visible mark is found")] = True,
+    detection_mode: Annotated[
+        Literal["gemini", "auto"],
+        Form(description="gemini: caller confirms Gemini origin; auto: infer vendor from content/metadata"),
+    ] = "gemini",
+    region: Annotated[
+        str | None,
+        Form(description="Optional explicit erase rectangle: x,y,width,height in decoded image pixels"),
+    ] = None,
 ):
-    """Return a PNG with known visible marks and AI metadata removed."""
-    return await clean_file(file, "image", require_watermark)
+    """Return a PNG. Gemini mode uses the caller's provider hint even without metadata."""
+    options: dict = {"detection_mode": detection_mode}
+    if region is not None:
+        try:
+            box = [int(value.strip()) for value in region.split(",")]
+            if len(box) != 4 or min(box[:2]) < 0 or min(box[2:]) <= 0:
+                raise ValueError
+        except ValueError as exc:
+            raise HTTPException(422, "region must be x,y,width,height; x,y >= 0 and width,height > 0") from exc
+        options["region"] = box
+    return await clean_file(file, "image", require_watermark, options)
 
 
 @app.post("/v1/remove/video", tags=["remove"], responses=FILE_RESPONSES, response_class=FileResponse)

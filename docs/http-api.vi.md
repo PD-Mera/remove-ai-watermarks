@@ -9,7 +9,7 @@ Google API key. Các endpoint không yêu cầu xác thực hay header API key.
 
 | Input | Xử lý | Output |
 | --- | --- | --- |
-| PNG, JPEG, WebP từ Gemini / Nano Banana | Tự phát hiện dấu nhìn thấy bằng registry sẵn có, inpaint vùng dấu, xóa metadata AI | PNG, giữ kích thước và alpha theo thư viện |
+| PNG, JPEG, WebP từ Gemini / Nano Banana | Mặc định chỉ dò dấu Gemini với thông tin nguồn do người gọi xác nhận, inpaint vùng dấu, xóa metadata AI | PNG, giữ kích thước và alpha theo thư viện |
 | MP4, MOV, M4V từ Veo | Chỉ dò dấu Veo (`mark="veo"`), kiểm tra vị trí ổn định qua các frame, inpaint có temporal consistency, xóa metadata AI | Video cùng container; video encode lại, audio copy theo khả năng thư viện |
 
 Đây là xóa **watermark nhìn thấy và metadata AI**, không phải cam kết loại bỏ
@@ -17,8 +17,11 @@ SynthID ẩn trong pixel hoặc watermark âm thanh. Header `X-SynthID-Processed
 là `false`. Nhánh SynthID của project dùng tái tạo ảnh/video, có thể làm thay đổi
 nội dung và cần bộ phụ thuộc/model khác; API này không bật nhánh đó.
 
-Ảnh dùng registry chung của project nên có thể xử lý cả dấu của nhà cung cấp khác
-nếu phát hiện được. Ảnh động bị từ chối. Video chỉ nhận một video stream, không có
+Ảnh mặc định dùng `detection_mode=gemini`: việc chọn chế độ này xác nhận ảnh đến
+từ Gemini, giúp dùng ngưỡng dành cho nguồn đã biết ngay cả khi ảnh mất metadata.
+Đây là thông tin do người gọi cung cấp, không phải chứng thực metadata. Chế độ
+`detection_mode=auto` giữ hành vi cũ: registry nhiều nhà cung cấp, chỉ nới ngưỡng
+khi có bằng chứng nguồn tương ứng. Ảnh động bị từ chối. Video chỉ nhận một video stream, không có
 cover art; audio không được xác minh watermark. Dấu bị crop, biến dạng hoặc chèn
 theo mẫu khác có thể không được nhận diện. Video được inpaint bằng nội suy nên
 vùng xóa có thể có vết; không có bộ xác minh thị giác độc lập cho video trong luồng này.
@@ -62,10 +65,30 @@ viết lệnh trên một dòng, hoặc thay dấu xuống dòng `\` bằng back
 ```bash
 curl --fail --show-error \
   -F 'file=@gemini.png' \
+  -F 'detection_mode=gemini' \
   -D image-headers.txt \
   -o clean.png \
   http://localhost:8000/v1/remove/image
 ```
+
+Nếu ảnh bị resize, crop hoặc detector không nhận ra dấu, có thể chỉ định vùng
+cần xóa bằng `region=x,y,width,height` theo pixel của ảnh đã decode. Vùng này phải
+nằm hoàn toàn trong ảnh. Tham số này có ưu tiên cao hơn `detection_mode`, không
+cần detector nhận diện trước và chỉ inpaint đúng hình chữ nhật bạn chỉ định.
+Hãy chọn vùng bao hết dấu, có thêm ít viền nền. Ví dụ sau chỉ minh họa một vùng
+80×80 tại (920,920) trên ảnh đủ lớn; thay tọa độ theo ảnh thực tế:
+
+```bash
+curl --fail --show-error \
+  -F 'file=@gemini.png' \
+  -F 'region=920,920,80,80' \
+  -o clean.png \
+  http://localhost:8000/v1/remove/image
+```
+
+API không tự xóa góc phải nếu dò không ra dấu. `region` là lệnh xóa vùng do người
+gọi chọn; kết quả báo `processed`, không khẳng định đã nhận diện đúng dấu Gemini.
+Nếu còn dấu được detector chấp nhận chồng lên vùng vừa xóa, API vẫn trả 422.
 
 Video Veo:
 
@@ -97,8 +120,8 @@ Các header kết quả:
 
 | Header | Ý nghĩa |
 | --- | --- |
-| `X-Watermark-Status` | Ảnh: `cleaned` hoặc `no_watermark`; video: `processed` hoặc `no_watermark` |
-| `X-Watermark-Report` | JSON nhỏ: danh sách mark, trạng thái, với video có tổng số frame và số frame được phát hiện/xử lý |
+| `X-Watermark-Status` | Ảnh: `cleaned`, `processed` (xóa vùng chỉ định) hoặc `no_watermark`; video: `processed` hoặc `no_watermark` |
+| `X-Watermark-Report` | JSON nhỏ: mark, trạng thái; chế độ Gemini có confidence/vùng ứng viên/kích thước ảnh và vùng đã xóa; video có số frame |
 | `X-SynthID-Processed` | `false` |
 | `Content-Disposition` | Tên file tải xuống |
 | `Cache-Control` | `no-store` |
@@ -107,6 +130,21 @@ Các header kết quả:
 còn dấu theo detector (`partial`) hoặc không xác minh được (`unvalidated`), API
 trả 422 và không gửi file. `processed` của video báo đã xử lý các frame phát hiện
 được, không xác nhận mọi frame đều sạch.
+
+Khi dò/xóa dấu ảnh thất bại, lỗi JSON có `detail.message` và `detail.report` chứa
+thông tin nhận diện (chế độ, confidence, vùng ứng viên...) nếu đã có báo cáo.
+Vùng ứng viên không được chấp nhận không có nghĩa đó là vị trí watermark thật.
+`require_watermark=false` không ép xóa dấu, không phải cách sửa lỗi nhận diện.
+
+Sau khi cập nhật mã nguồn, build lại trên máy triển khai:
+
+```bash
+docker compose --env-file .env.api up -d --build --force-recreate
+curl http://localhost:8000/healthz
+```
+
+Health cần có `version: "1.1.0"` để xác nhận đang chạy adapter mới. Vẫn cần đối
+chiếu ảnh thực tế; thay đổi ngưỡng không bảo đảm nhận diện mọi biến thể dấu.
 
 ## Giới hạn và vận hành
 

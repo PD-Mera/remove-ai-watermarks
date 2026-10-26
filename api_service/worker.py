@@ -13,10 +13,12 @@ import warnings
 
 
 class RejectedMedia(Exception):
-    pass
+    def __init__(self, message: str, report: dict | None = None):
+        super().__init__(message)
+        self.report = report
 
 
-def process_image(source: Path, output: Path, backend: str, required: bool) -> dict:
+def process_image(source: Path, output: Path, backend: str, required: bool, options: dict) -> dict:
     from PIL import Image, UnidentifiedImageError
     from remove_ai_watermarks import remove_visible_detailed
 
@@ -35,12 +37,93 @@ def process_image(source: Path, output: Path, backend: str, required: bool) -> d
                 image.verify()
     except (UnidentifiedImageError, OSError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
         raise RejectedMedia("Invalid image or image exceeds the pixel limit") from exc
+    if options.get("region") is not None or options.get("detection_mode", "gemini") == "gemini":
+        return process_gemini_image(source, output, backend, required, options)
     result = remove_visible_detailed(source, output, backend=backend, strip_metadata=True, write_noop=True)
     if result.status == "no_watermark" and required:
-        raise RejectedMedia("No supported visible watermark detected; use require_watermark=false for passthrough")
+        raise RejectedMedia(
+            "No supported visible watermark detected; try detection_mode=gemini or supply region=x,y,width,height",
+            {"status": result.status, "detection_mode": "auto"},
+        )
     if result.status in {"partial", "unvalidated"}:
-        raise RejectedMedia(f"Visible removal is {result.status}; no file returned")
+        raise RejectedMedia(f"Visible removal is {result.status}; no file returned", {
+            "status": result.status,
+            "marks": [{"key": mark.key, "region": mark.region, "status": mark.status,
+                       "confidence_before": mark.confidence_before,
+                       "confidence_after": mark.confidence_after} for mark in result.marks],
+        })
     return {"status": result.status, "marks": [mark.key for mark in result.marks], "synthid_processed": False}
+
+
+def process_gemini_image(source: Path, output: Path, backend: str, required: bool, options: dict) -> dict:
+    """Scope detection to Gemini; permit a caller-specified box for missed marks.
+
+    The registry's provenance=True flag selects its provider-confirmed gate. Here
+    the evidence is explicitly the caller's Gemini mode, not fabricated metadata.
+    No standard-corner force fallback is used on a negative detection.
+    """
+    from remove_ai_watermarks import image_io
+    from remove_ai_watermarks.metadata import strip_written_output
+    from remove_ai_watermarks.region_eraser import boxes_to_mask
+    from remove_ai_watermarks.watermark_registry import fill, get_mark
+
+    image, alpha = image_io.read_bgr_and_alpha(source)
+    if image is None:
+        raise RejectedMedia("Cannot decode image")
+    height, width = image.shape[:2]
+    mark = get_mark("gemini")
+    before = mark.detect(image, provenance=True)
+    report = {
+        "status": "no_watermark", "marks": [], "synthid_processed": False,
+        "detection_mode": "gemini", "provider_hint": "caller",
+        "confidence_before": before.confidence,
+        "candidate_region": list(before.region),
+        "image_size": [width, height], "backend": backend,
+    }
+    explicit_region = options.get("region")
+    if explicit_region is not None:
+        x, y, w, h = explicit_region
+        if min(x, y) < 0 or min(w, h) <= 0 or x + w > width or y + h > height:
+            raise RejectedMedia("region must fit within the decoded image dimensions", report)
+        box = (x, y, w, h)
+        mask = boxes_to_mask((height, width), [box], dilate=0)
+        report["detection_mode"] = "manual_region"
+        report["provider_hint"] = "not_used"
+    elif before.detected:
+        localization = mark.localize(image, provenance=True, detection=before)
+        mask = localization.mask
+        box = before.region
+    else:
+        if required:
+            raise RejectedMedia(
+                "Gemini sparkle not detected. Supply region=x,y,width,height for an explicit erase. "
+                "require_watermark=false only strips metadata; it does not force removal.", report,
+            )
+        mask = None
+        box = None
+
+    result = image
+    if box is not None:
+        if mask is None or not mask.any():
+            raise RejectedMedia("Detector did not produce a usable erase mask", report)
+        result = fill(image, mask, backend=backend)
+        after = mark.detect(result, provenance=True)
+        report.update({"region": list(box), "confidence_after": after.confidence,
+                       "marks": ["gemini"] if explicit_region is None else [],
+                       "status": "cleaned" if explicit_region is None else "processed"})
+        ax, ay, aw, ah = after.region
+        x, y, w, h = box
+        if after.detected and ax < x + w and x < ax + aw and ay < y + h and y < ay + ah:
+            report["status"] = "partial"
+            raise RejectedMedia("Gemini sparkle is still detected in the erased region; no file returned", report)
+
+    if not image_io.write_bgr_with_alpha(
+        output, result, alpha, display_tags_from=source, orientation_applied=False,
+    ):
+        raise RuntimeError("Failed to write processed image")
+    if strip_written_output(output):
+        raise RuntimeError("AI metadata remains after processing")
+    return report
 
 
 def process_video(source: Path, output: Path, backend: str, required: bool) -> dict:
@@ -83,13 +166,20 @@ def process_video(source: Path, output: Path, backend: str, required: bool) -> d
 
 
 def main() -> int:
-    kind, source, output, report, backend, mode = sys.argv[1:]
+    kind, source, output, report, backend, mode, options_json = sys.argv[1:]
     logging.basicConfig(level=logging.INFO)
     try:
-        processor = process_image if kind == "image" else process_video
-        result = processor(Path(source), Path(output), backend, mode == "required")
+        if kind == "image":
+            result = process_image(Path(source), Path(output), backend, mode == "required", json.loads(options_json))
+        else:
+            result = process_video(Path(source), Path(output), backend, mode == "required")
         code = 0
-    except (RejectedMedia, ValueError) as exc:
+    except RejectedMedia as exc:
+        result = {"error": str(exc), "http_status": 422}
+        if exc.report is not None:
+            result["report"] = exc.report
+        code = 1
+    except ValueError as exc:
         result = {"error": str(exc), "http_status": 422}
         code = 1
     except Exception:
