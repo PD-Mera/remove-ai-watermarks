@@ -1,0 +1,41 @@
+services:
+  watermark-api:
+    build:
+      context: .
+      args:
+        WATERMARK_EXTRAS: ${WATERMARK_EXTRAS:-video}
+    ports:
+      - "${API_BIND_HOST:-127.0.0.1}:${API_PORT:-8000}:8000"
+    environment:
+      API_KEY: ${API_KEY:?Set API_KEY in .env.api}
+      WATERMARK_BACKEND: ${WATERMARK_BACKEND:-cv2}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-512}
+      MAX_CONCURRENT_JOBS: ${MAX_CONCURRENT_JOBS:-1}
+      PROCESS_TIMEOUT_SECONDS: ${PROCESS_TIMEOUT_SECONDS:-1800}
+      UPLOAD_IDLE_TIMEOUT_SECONDS: ${UPLOAD_IDLE_TIMEOUT_SECONDS:-60}
+      MAX_IMAGE_PIXELS: ${MAX_IMAGE_PIXELS:-40000000}
+      MAX_VIDEO_SECONDS: ${MAX_VIDEO_SECONDS:-300}
+      MAX_VIDEO_PIXELS: ${MAX_VIDEO_PIXELS:-8294400}
+    volumes:
+      - work:/work
+      - models:/home/app/.cache/huggingface
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: ${MEMORY_LIMIT:-8g}
+    cpus: ${CPU_LIMIT:-4.0}
+    stop_grace_period: 45s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  work:
+  models:

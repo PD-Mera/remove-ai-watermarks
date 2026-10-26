@@ -65,6 +65,7 @@ gfpgan/
 # Local evaluation data
 .local-eval/
 /.oracle-slots.json
+/.env.api
 
 # Other harnesses' generated config. Claude's sync owns these; a committed copy
 # is a second source nobody reconciles. Anchored so a same-named source file

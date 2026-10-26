@@ -1,5 +1,9 @@
 # Remove AI Watermarks
 
+HTTP API + Docker Compose for Gemini / Nano Banana images and Veo videos:
+[Vietnamese deployment guide](docs/http-api.vi.md). The API returns one processed
+file per upload and handles visible marks plus AI metadata; hidden SynthID is excluded.
+
 Remove AI provenance marks from images and video you generated yourself:
 
 - known visible labels such as the Google Gemini sparkle watermark and vendor text marks;
